@@ -1,7 +1,6 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, expr, to_date, date_format, year, month, dayofmonth
 from pyspark.sql.window import Window
-from awsglue.utils import getResolvedOptions
 
 from Attributes import Attributes
 from taslibrary import sns_helper as sns_service
