@@ -35,7 +35,7 @@ def extract_csv_to_df(spark: SparkSession, file_name: str, args: dict, load_type
 
 def load_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) -> DataFrame:
     """
-    Loads and filters allocation data from SQL source.
+    Loads and filters allocation data from SQL source. Drops duplicates based on sec_id and trade_date_est only.
 
     :return: Cleaned allocation DataFrame
     """
@@ -56,9 +56,12 @@ def load_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) ->
         to_date(col("trade_date_local").cast("string").substr(1, 10)).alias("trade_date_local"),
         to_date(col("trade_date_est").cast("string").substr(1, 10)).alias("trade_date_est"),
         to_date(col("trade_date_utc").cast("string").substr(1, 10)).alias("trade_date_utc")
-    ).dropDuplicates()
+    )
 
-    logger.info(f"Allocations cleaned: {df.count()} records")
+    # Drop duplicates on (sec_id, trade_date_est)
+    df = df.dropDuplicates(["sec_id", "trade_date_est"])
+
+    logger.info(f"Allocations cleaned and deduplicated: {df.count()} records")
     s3_helper.upload_process_logs_spdf(df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_cleaned")
     return df
 
