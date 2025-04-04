@@ -69,18 +69,21 @@ def load_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) ->
 def load_csm_security(spark: SparkSession, s3_helper, args: dict) -> DataFrame:
     """
     Loads CSM security data from SQL source and prepares it for joining.
+    Fixes null datadate issue using correct format parsing.
 
     :return: Cleaned CSM DataFrame
     """
     logger.info("Loading CSM security data")
+
     df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.CSM_SECURITY_UNION_QUERY_PATH.value,
     ).withColumn("source", expr("'O'"))
 
+    # Correctly parse datadate from int string like 20240103 to date
     df_clean = df.select(
-        to_date(date_format(col("datadate").cast("string"), "yyyyMMdd")).alias("datadate"),
+        to_date(col("datadate").cast("string"), "yyyyMMdd").alias("datadate"),
         "sec_id", "ext_sec_id", "sedol", "cusip", "isin_no", "ticker"
     )
 
@@ -91,24 +94,62 @@ def load_csm_security(spark: SparkSession, s3_helper, args: dict) -> DataFrame:
 
 def join_allocations_with_security(alloc_df: DataFrame, sec_df: DataFrame, s3_helper, args: dict) -> DataFrame:
     """
-    Joins allocations with CSM security data based on sec_id and trade_date_est.
-
-    :return: Joined DataFrame where ext_sec_id is null
+    Joins allocations with CSM security on sec_id and trade_date_est.
+    Saves both null-ext_sec_id filtered records and full join result to S3.
+    
+    :return: Full joined DataFrame (with ext_sec_id both null and not null)
     """
-    logger.info("Joining allocations with CSM security")
+    logger.info("Joining allocations with cleaned CSM security")
+
+    # Cast sec_id for join
     alloc_df_casted = alloc_df.withColumn("sec_id_str", col("sec_id").cast("string"))
 
-    joined_df = alloc_df_casted.join(
+    # Perform the left join
+    full_joined_df = alloc_df_casted.join(
         sec_df,
         (alloc_df_casted["sec_id_str"] == sec_df["sec_id"]) &
         (alloc_df_casted["trade_date_est"] == sec_df["datadate"]),
         how="left"
     )
 
-    result = joined_df.filter(col("ext_sec_id").isNull())
-    logger.info(f"Post-join filtered records: {result.count()}")
-    s3_helper.upload_process_logs_spdf(result, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_join_filtered")
-    return result
+    logger.info(f"Total records after join: {full_joined_df.count()}")
+
+    # Save full joined result to S3
+    s3_helper.upload_process_logs_spdf(
+        full_joined_df.select(
+            col("sec_id"),
+            col("ext_sec_id"),
+            col("sedol"),
+            col("cusip"),
+            col("isin_no"),
+            col("ticker")
+        ),
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "allocations_security_join_all"
+    )
+
+    # Filtered where ext_sec_id is NULL
+    null_filtered_df = full_joined_df.filter(col("ext_sec_id").isNull()).select(
+        col("sec_id"),
+        col("ext_sec_id"),
+        col("sedol"),
+        col("cusip"),
+        col("isin_no"),
+        col("ticker")
+    )
+
+    logger.info(f"Filtered records where ext_sec_id IS NULL: {null_filtered_df.count()}")
+
+    # Save filtered null-ext_sec_id records to S3
+    s3_helper.upload_process_logs_spdf(
+        null_filtered_df,
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "allocations_security_join_null_only"
+    )
+
+    return full_joined_df
 
 
 def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
