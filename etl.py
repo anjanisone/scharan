@@ -168,29 +168,44 @@ def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: Da
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value,
     )
 
-    srm_df = srm_df.withColumn("srm_year", year(col("dte_eff_ct"))) \
-                   .withColumn("srm_month", month(col("dte_eff_ct"))) \
-                   .withColumn("srm_day", dayofmonth(col("dte_eff_ct")))
+    srm_df = srm_df.withColumn("file_eff_dt_plus1", date_add(col("file_eff_dt"), 1))
 
-    joined_df = joined_df.withColumn("alloc_year", year(col("trade_date_est"))) \
-                         .withColumn("alloc_month", month(col("trade_date_est"))) \
-                         .withColumn("alloc_day", dayofmonth(col("trade_date_est")))
+    # Extract join keys
+    srm_df = srm_df.withColumn("srm_year", year(col("file_eff_dt_plus1"))) \
+                   .withColumn("srm_month", month(col("file_eff_dt_plus1"))) \
+                   .withColumn("srm_day", dayofmonth(col("file_eff_dt_plus1")))
 
+    srm_df = srm_df.alias("s")
+    joined_df = joined_df.alias("a")
+
+    # Prepare allocation join keys
+    joined_df = joined_df.withColumn("alloc_year", year(col("a.trade_date_est"))) \
+                         .withColumn("alloc_month", month(col("a.trade_date_est"))) \
+                         .withColumn("alloc_day", dayofmonth(col("a.trade_date_est")))
+
+    # Join using +1 day logic and aliases
     final_df = joined_df.join(
         srm_df,
-        (joined_df["alloc_year"] == srm_df["srm_year"]) &
-        (joined_df["alloc_month"] == srm_df["srm_month"]) &
-        (joined_df["alloc_day"] == srm_df["srm_day"]),
+        (col("a.alloc_year") == col("s.srm_year")) &
+        (col("a.alloc_month") == col("s.srm_month")) &
+        (col("a.alloc_day") == col("s.srm_day")),
         how="left"
     ).select(
-        col("srm.vanguard_id_undr").alias("neoxam_underlying_vanguard_id"),
-        col("srm_dom.sedol_id").alias("neoxam_underlying_trade_date_sedol"),
-        col("srm_dom.ticker").alias("neoxam_underlying_trade_date_ticker"),
-        col("srm_dom.isin_id").alias("neoxam_underlying_trade_date_isin")
+        col("s.vanguard_id_undr").alias("neoxam_underlying_vanguard_id"),
+        col("s.sedol_id").alias("neoxam_underlying_trade_date_sedol"),
+        col("s.ticker").alias("neoxam_underlying_trade_date_ticker"),
+        col("s.isin_id").alias("neoxam_underlying_trade_date_isin")
     )
 
-    logger.info(f"Final SRM-enriched records: {final_df.count()}")
-    s3_helper.upload_process_logs_spdf(final_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "final_output_neoxam_srm_only")
+    logger.info(f"Final records after SRM join with file_eff_dt + 1 day: {final_df.count()}")
+
+    s3_helper.upload_process_logs_spdf(
+        final_df,
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "final_output_neoxam_srm_file_eff_plus1"
+    )
+
     return final_df
 
 
