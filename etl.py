@@ -166,25 +166,30 @@ def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: Da
     srm_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
-        Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value
-    ).alias("s")
-
-    joined_df = joined_df.alias("a")
-
-    # Adjust SRM day: simulate (year, month, day - 1)
-    srm_df = srm_df.withColumn("adjusted_day", col("day") - 1)
-
-    # Build adjusted date column
-    srm_df = srm_df.withColumn(
-        "adjusted_date",
-        to_date(concat_ws("-", col("year"), lpad(col("month"), 2, "0"),
-                          lpad(col("adjusted_day"), 2, "0")))
+        Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value,
     )
 
-    # Join on adjusted date == trade_date_est
+    srm_df = srm_df.withColumn("file_eff_dt_plus1", date_add(col("file_eff_dt"), 1))
+
+    # Extract join keys
+    srm_df = srm_df.withColumn("srm_year", year(col("file_eff_dt_plus1"))) \
+                   .withColumn("srm_month", month(col("file_eff_dt_plus1"))) \
+                   .withColumn("srm_day", dayofmonth(col("file_eff_dt_plus1")))
+
+    srm_df = srm_df.alias("s")
+    joined_df = joined_df.alias("a")
+
+    # Prepare allocation join keys
+    joined_df = joined_df.withColumn("alloc_year", year(col("a.trade_date_est"))) \
+                         .withColumn("alloc_month", month(col("a.trade_date_est"))) \
+                         .withColumn("alloc_day", dayofmonth(col("a.trade_date_est")))
+
+    # Join using +1 day logic and aliases
     final_df = joined_df.join(
         srm_df,
-        col("a.trade_date_est") == col("s.adjusted_date"),
+        (col("a.alloc_year") == col("s.srm_year")) &
+        (col("a.alloc_month") == col("s.srm_month")) &
+        (col("a.alloc_day") == col("s.srm_day")),
         how="left"
     ).select(
         col("s.vanguard_id_undr").alias("neoxam_underlying_vanguard_id"),
@@ -193,13 +198,13 @@ def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: Da
         col("s.isin_id").alias("neoxam_underlying_trade_date_isin")
     )
 
-    logger.info(f"Final records after SRM join with (day - 1): {final_df.count()}")
+    logger.info(f"Final records after SRM join with file_eff_dt + 1 day: {final_df.count()}")
 
     s3_helper.upload_process_logs_spdf(
         final_df,
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "final_output_neoxam_srm_minus_1_day"
+        "final_output_neoxam_srm_file_eff_plus1"
     )
 
     return final_df
