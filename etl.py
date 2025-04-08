@@ -152,6 +152,7 @@ def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: Da
         col("a.alloc_trade_date_est") == col("s.file_eff_dt_minus1"),
         how="left"
     ).select(
+        *[col("a." + c) for c in joined_df.columns],
         col("s.file_eff_dt"),
         col("s.file_eff_dt_minus1"),
         col("s.vanguard_id_undr").alias("neoxam_underlying_vanguard_id"),
@@ -160,13 +161,14 @@ def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: Da
         col("s.isin_id").alias("neoxam_underlying_trade_date_isin")
     )
 
-    logger.info(f"Final SRM records after join using file_eff_dt - 1: {final_df.count()}")
+    logger.info(f"Final SRM join result count: {final_df.count()}")
 
+    # Save to S3
     s3_helper.upload_process_logs_spdf(
         final_df,
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "final_output_neoxam_srm_minus1_day"
+        "final_output_neoxam_srm_full"
     )
 
     return final_df
