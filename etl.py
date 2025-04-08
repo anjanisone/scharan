@@ -92,22 +92,8 @@ def load_csm_security(spark: SparkSession, s3_helper, args: dict) -> DataFrame:
     return df_clean
 
 
-def join_allocations_with_security(
-    alloc_df: DataFrame,
-    sec_df: DataFrame,
-    s3_helper,
-    args: dict
-) -> DataFrame:
-    """
-    Joins allocations with CSM security on sec_id and trade_date_est.
-    Extracts:
-      1. Records with ext_sec_id IS NULL (saved to S3)
-      2. Records with ext_sec_id IS NOT NULL (saved & returned)
-
-    :return: DataFrame with ext_sec_id IS NOT NULL
-    """
+def join_allocations_with_security(alloc_df: DataFrame, sec_df: DataFrame, s3_helper, args: dict) -> DataFrame:
     logger.info("Joining allocations with cleaned CSM security")
-
     alloc_df_casted = alloc_df.withColumn("sec_id_str", col("sec_id").cast("string")).alias("a")
     sec_df = sec_df.alias("c")
 
@@ -120,35 +106,21 @@ def join_allocations_with_security(
 
     logger.info(f"Total records after join: {full_joined_df.count()}")
 
-    selected_cols = [
-        col("a.sec_id").alias("sec_id"),
-        col("c.ext_sec_id"),
-        col("c.sedol"),
-        col("c.cusip"),
-        col("c.isin_no"),
-        col("c.ticker")
-    ]
-
-    selected_df = full_joined_df.select(*selected_cols)
-
-    # 1. Save rows where ext_sec_id IS NULL
-    null_df = selected_df.filter(col("ext_sec_id").isNull())
-    logger.info(f"Records where ext_sec_id IS NULL: {null_df.count()}")
-    s3_helper.upload_process_logs_spdf(
-        null_df,
-        args["s3TCASecIdBucket"].replace("s3://", ""),
-        args["JOB_NAME"],
-        "allocations_security_extsecid_null"
+    selected_df = full_joined_df.select(
+        *[col("a." + c).alias("alloc_" + c) for c in alloc_df.columns],
+        *[col("c." + c).alias("csm_" + c) for c in sec_df.columns]
     )
 
-    # 2. Keep and return rows where ext_sec_id IS NOT NULL
-    non_null_df = selected_df.filter(col("ext_sec_id").isNotNull())
-    logger.info(f"Records with ext_sec_id present: {non_null_df.count()}")
+    null_df = selected_df.filter(col("csm_ext_sec_id").isNull())
+    logger.info(f"ext_sec_id IS NULL records: {null_df.count()}")
     s3_helper.upload_process_logs_spdf(
-        non_null_df,
-        args["s3TCASecIdBucket"].replace("s3://", ""),
-        args["JOB_NAME"],
-        "allocations_security_extsecid_notnull"
+        null_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_extsecid_null"
+    )
+
+    non_null_df = selected_df.filter(col("csm_ext_sec_id").isNotNull())
+    logger.info(f"ext_sec_id IS NOT NULL records: {non_null_df.count()}")
+    s3_helper.upload_process_logs_spdf(
+        non_null_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_extsecid_notnull"
     )
 
     return non_null_df
@@ -156,55 +128,45 @@ def join_allocations_with_security(
 
 def load_and_join_srm(spark: SparkSession, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
     """
-    Joins the intermediate result with SRM data on trade_date_est (by year, month, day)
-    and selects key identifiers.
-
-    :return: Final DataFrame with Neoxam identifier columns
+    Joins allocations+CSM with SRM using (file_eff_dt - 1).
+    Extracts date from file_eff_dt, adjusts it, and joins with alloc_trade_date_est.
+    Includes both original and adjusted dates in the output.
     """
-    logger.info("Joining with SRM data")
+    logger.info("Joining with SRM data using file_eff_dt - 1")
 
+    # Load SRM
     srm_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
-        Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value,
-    )
+        Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value
+    ).alias("s")
 
-    srm_df = srm_df.withColumn("file_eff_dt_plus1", date_add(col("file_eff_dt"), 1))
+    # Adjust: file_eff_dt - 1 day
+    srm_df = srm_df.withColumn("file_eff_dt_minus1", date_add(col("file_eff_dt"), -1))
 
-    # Extract join keys
-    srm_df = srm_df.withColumn("srm_year", year(col("file_eff_dt_plus1"))) \
-                   .withColumn("srm_month", month(col("file_eff_dt_plus1"))) \
-                   .withColumn("srm_day", dayofmonth(col("file_eff_dt_plus1")))
-
-    srm_df = srm_df.alias("s")
+    # Join with allocations+CSM using alloc_trade_date_est
     joined_df = joined_df.alias("a")
 
-    # Prepare allocation join keys
-    joined_df = joined_df.withColumn("alloc_year", year(col("a.trade_date_est"))) \
-                         .withColumn("alloc_month", month(col("a.trade_date_est"))) \
-                         .withColumn("alloc_day", dayofmonth(col("a.trade_date_est")))
-
-    # Join using +1 day logic and aliases
     final_df = joined_df.join(
         srm_df,
-        (col("a.alloc_year") == col("s.srm_year")) &
-        (col("a.alloc_month") == col("s.srm_month")) &
-        (col("a.alloc_day") == col("s.srm_day")),
+        col("a.alloc_trade_date_est") == col("s.file_eff_dt_minus1"),
         how="left"
     ).select(
+        col("s.file_eff_dt"),
+        col("s.file_eff_dt_minus1"),
         col("s.vanguard_id_undr").alias("neoxam_underlying_vanguard_id"),
         col("s.sedol_id").alias("neoxam_underlying_trade_date_sedol"),
         col("s.ticker").alias("neoxam_underlying_trade_date_ticker"),
         col("s.isin_id").alias("neoxam_underlying_trade_date_isin")
     )
 
-    logger.info(f"Final records after SRM join with file_eff_dt + 1 day: {final_df.count()}")
+    logger.info(f"Final SRM records after join using file_eff_dt - 1: {final_df.count()}")
 
     s3_helper.upload_process_logs_spdf(
         final_df,
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "final_output_neoxam_srm_file_eff_plus1"
+        "final_output_neoxam_srm_minus1_day"
     )
 
     return final_df
