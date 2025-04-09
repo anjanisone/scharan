@@ -116,11 +116,11 @@ def join_allocations_with_security(alloc_df, sec_df, s3_helper, args):
     )
 
     null_df = selected_df.filter(
-    col("csm_ext_sec_id").isNull() &
-    col("csm_sedol").isNull() &
-    col("csm_cusip").isNull() &
-    col("csm_isin_no").isNull() &
-    col("csm_ticker").isNull()
+    col("ext_sec_id").isNull() &
+    col("sedol").isNull() &
+    col("cusip").isNull() &
+    col("isin_no").isNull() &
+    col("ticker").isNull()
     )
     s3_helper.upload_process_logs_spdf(
         null_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_extsecid_null"
