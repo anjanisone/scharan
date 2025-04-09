@@ -115,17 +115,18 @@ def join_allocations_with_security(alloc_df, sec_df, s3_helper, args):
         ]
     )
 
-    null_df = selected_df.filter(col("csm_ext_sec_id").isNull())
+    null_df = selected_df.filter(
+    col("csm_ext_sec_id").isNull() &
+    col("csm_sedol").isNull() &
+    col("csm_cusip").isNull() &
+    col("csm_isin_no").isNull() &
+    col("csm_ticker").isNull()
+    )
     s3_helper.upload_process_logs_spdf(
         null_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_extsecid_null"
     )
 
-    non_null_df = selected_df.filter(col("csm_ext_sec_id").isNotNull())
-    s3_helper.upload_process_logs_spdf(
-        non_null_df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_security_extsecid_notnull"
-    )
-
-    return non_null_df
+    return selected_df
 
 
 def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
