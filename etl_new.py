@@ -61,26 +61,10 @@ def join_allocations_with_security(spark, alloc_df, sec_df, s3_helper, args):
     alloc_df_casted.createOrReplaceTempView("alloc_df")
     sec_df.createOrReplaceTempView("csm_df")
 
-    joined_df = spark.sql("""
-        SELECT 
-            a.sec_id AS sec_id,
-            a.crdtradedate AS crdtradedate,
-            a.trade_date_local AS trade_date_local,
-            a.trade_date_est AS trade_date_est,
-            a.trade_date_utc AS trade_date_utc,
-            a.sec_id_str AS sec_id_str,
+    sql_path = Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_CSM_JOIN_SQL.value
+    sql_query = Utils(logger).read_sql_file(sql_path)
 
-            c.ext_sec_id AS ext_sec_id,
-            c.sedol AS sedol,
-            c.cusip AS cusip,
-            c.isin_no AS isin_no,
-            c.ticker AS ticker,
-            c.datadate AS datadate
-        FROM alloc_df a
-        LEFT JOIN csm_df c
-            ON a.sec_id_str = c.sec_id
-            AND a.trade_date_est = c.datadate
-    """)
+    joined_df = spark.sql(sql_query)
 
     logger.info(f"Total records after allocations + CSM join: {joined_df.count()}")
 
@@ -103,7 +87,7 @@ def join_allocations_with_security(spark, alloc_df, sec_df, s3_helper, args):
 
 
 def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
-    logger.info("Joining with SRM and SRMMF using previous_trade_date_est and Spark SQL")
+    logger.info("Joining with SRM and SRMMF using Spark SQL from SQL file")
 
     joined_df = joined_df.withColumn("previous_trade_date_est", date_add(col("trade_date_est"), -1))
     joined_df.createOrReplaceTempView("alloc_csm_view")
@@ -112,37 +96,20 @@ def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args:
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value
-    ).withColumn(
-        "file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd")
-    )
+    ).withColumn("file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd"))
     srm_df.createOrReplaceTempView("srm")
 
     srmmf_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRMMF_QUERY_PATH.value
-    ).withColumn(
-        "file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd")
-    )
+    ).withColumn("file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd"))
     srmmf_df.createOrReplaceTempView("srmmf")
 
-    final_df = spark.sql("""
-        SELECT 
-            a.*, 
-            COALESCE(srm.vanguard_id_undr, srmmf.vanguard_id_undr) AS neoxam_underlying_vanguard_id,
-            COALESCE(srm.sedol_id, srmmf.sedol_id) AS neoxam_underlying_trade_date_sedol,
-            COALESCE(srm.ticker, srmmf.ticker) AS neoxam_underlying_trade_date_ticker,
-            COALESCE(srm.isin_id, srmmf.isin_id) AS neoxam_underlying_trade_date_isin,
-            srm.file_eff_dt AS srm_file_eff_dt,
-            srm.file_eff_dt_parsed AS srm_file_eff_dt_parsed,
-            srmmf.file_eff_dt AS srmmf_file_eff_dt,
-            srmmf.file_eff_dt_parsed AS srmmf_file_eff_dt_parsed
-        FROM alloc_csm_view a
-        LEFT JOIN srm
-            ON a.previous_trade_date_est = srm.file_eff_dt_parsed
-        LEFT JOIN srmmf
-            ON a.previous_trade_date_est = srmmf.file_eff_dt_parsed
-    """)
+    sql_path = Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_SRM_SRMMF_JOIN_SQL.value
+    sql_query = Utils(logger).read_sql_file(sql_path)
+
+    final_df = spark.sql(sql_query)
 
     logger.info(f"Final SRM+SRMMF join result count: {final_df.count()}")
 
