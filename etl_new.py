@@ -87,25 +87,30 @@ def join_allocations_with_security(spark, alloc_df, sec_df, s3_helper, args):
 
 
 def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
-    logger.info("Joining with SRM and SRMMF using Spark SQL from SQL file")
+    logger.info("Joining with SRM and SRMMF using string-based joins on ext_sec_id and previous_trade_date_est")
 
+    # Convert trade_date_est to previous day and cast to string
     joined_df = joined_df.withColumn("previous_trade_date_est", date_add(col("trade_date_est"), -1))
+    joined_df = joined_df.withColumn("previous_trade_date_est_str", date_format(col("previous_trade_date_est"), "yyyyMMdd"))
     joined_df.createOrReplaceTempView("alloc_csm_view")
 
+    # Load SRM
     srm_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value
-    ).withColumn("file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd"))
+    )
     srm_df.createOrReplaceTempView("srm")
 
+    # Load SRMMF
     srmmf_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRMMF_QUERY_PATH.value
-    ).withColumn("file_eff_dt_parsed", to_date(col("file_eff_dt").cast("string"), "yyyyMMdd"))
+    )
     srmmf_df.createOrReplaceTempView("srmmf")
 
+    # Read SQL from file (defined in Attributes)
     sql_path = Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_SRM_SRMMF_JOIN_SQL.value
     sql_query = Utils(logger).read_sql_file(sql_path)
 
