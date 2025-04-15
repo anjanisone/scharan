@@ -165,3 +165,6 @@ if __name__ == "__main__":
         #logger.info(f"Final joined DataFrame count: {final_df.count()} records")
         final_df.show(truncate=False)
         logger.info("ETL job completed successfully.")
+
+    spark.stop()
+    logger.info("Spark session stopped.")
