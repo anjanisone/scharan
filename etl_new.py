@@ -6,6 +6,7 @@ from Attributes import Attributes
 from taslibrary import sns_helper as sns_service
 from taslibrary import glue_service, s3_service, logService
 from utils import Utils
+import sys
 
 
 def load_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) -> DataFrame:
@@ -132,35 +133,35 @@ def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args:
 
 if __name__ == "__main__":
     logger = logService.get_logger()
+    logger.info("Starting security_trade_date_identifiers ETL job")
+    util = Utils(logger)
+    args = util.get_args_dict(sys_args_list=Attributes.SVS_ARGS_LIST.value)
 
-    try:
-        logger.info("Starting security_trade_date_identifiers ETL job")
-        util = Utils(logger)
-        args = util.get_args_dict(sys_args_list=Attributes.SVS_ARGS_LIST.value)
+    spark = util.get_spark_session()
+    glue_helper = glue_service.GlueService(logger)
+    s3_helper = s3_service.S3Service(logger, args["sysLevel"])
 
-        spark = util.get_spark_session()
-        glue_helper = glue_service.GlueService(logger)
-        s3_helper = s3_service.S3Service(logger, args["sysLevel"])
+    logger.info(f"Python Version: {sys.version}")
+    logger.info(f"Spark Version: {spark.version}")
+    logger.info(f"Job Arguments: {args}")
 
-        # Step 1: Load and clean allocations
+    
+    logger.info("Glue Job Initialized")
+    logger.info(f"Process type: {args['processType']}")
+
+    if args['processType'] == "daily":
+        pass
+
+    elif args['processType'] == "historic":
+
+        
         allocations_df = load_allocations(spark, glue_helper, s3_helper, args)
-
-        # Step 2: Load and clean CSM security
+        logger.info(f"Allocations loaded: {allocations_df.count()} records")
         csm_df = load_csm_security(spark, s3_helper, args)
-
-        # Step 3: Join allocations with CSM security
+        logger.info(f"CSM security loaded: {csm_df.count()} records")
         joined_df = join_allocations_with_security(spark, allocations_df, csm_df, s3_helper, args)
-
-        # Step 4: Join with SRM/SRMMF using previous_trade_date_est
+        logger.info(f"Joined allocations with CSM security: {joined_df.count()} records")
         final_df = load_and_join_srm(spark, glue_helper, s3_helper, joined_df, args)
-
+        #logger.info(f"Final joined DataFrame count: {final_df.count()} records")
         final_df.show(truncate=False)
         logger.info("ETL job completed successfully.")
-
-    except Exception as e:
-        logger.error("ETL job failed with error: " + str(e))
-        raise
-
-    finally:
-        logger.info("Stopping Spark session.")
-        spark.stop()
