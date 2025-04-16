@@ -32,7 +32,7 @@ def load_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) ->
     df = df.dropDuplicates(["sec_id", "trade_date_est"])
 
     logger.info(f"Allocations cleaned and deduplicated: {df.count()} records")
-    s3_helper.upload_process_logs_spdf(df, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_cleaned")
+    s3_helper.upload_process_logs_spdf(df.limit(1000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "allocations_cleaned")
     return df
 
 
@@ -51,7 +51,7 @@ def load_csm_security(spark: SparkSession, s3_helper, args: dict) -> DataFrame:
     )
 
     logger.info(f"CSM security cleaned: {df_clean.count()} records")
-    s3_helper.upload_process_logs_spdf(df_clean, args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "csm_cleaned")
+    s3_helper.upload_process_logs_spdf(df_clean.limit(1000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "csm_cleaned")
     return df_clean
 
 
@@ -78,7 +78,7 @@ def join_allocations_with_security(spark, alloc_df, sec_df, s3_helper, args):
     )
 
     s3_helper.upload_process_logs_spdf(
-        null_df,
+        null_df.limit(1000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
         "allocations_security_extsecid_null"
@@ -120,7 +120,7 @@ def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args:
     logger.info(f"Final SRM+SRMMF join result count: {final_df.count()}")
 
     s3_helper.upload_process_logs_spdf(
-        final_df,
+        final_df.limit(1000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
         "final_output_neoxam_srm_srmmf"
