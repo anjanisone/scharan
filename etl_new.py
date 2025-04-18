@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, expr, to_date, date_format, year, month, dayofmonth, date_add, coalesce
+from pyspark.sql.functions import col, expr, to_date, date_format, year, month, dayofmonth, date_add, coalesce, lag
 from pyspark.sql.window import Window
 
 from Attributes import Attributes
@@ -90,28 +90,28 @@ def join_allocations_with_security(spark, alloc_df, sec_df, s3_helper, args):
 def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
     logger.info("Joining with SRM and SRMMF using string-based joins on ext_sec_id and previous_trade_date_est")
 
-    # Convert trade_date_est to previous day and cast to string
     joined_df = joined_df.withColumn("previous_trade_date_est", date_add(col("trade_date_est"), -1))
     joined_df = joined_df.withColumn("previous_trade_date_est_str", date_format(col("previous_trade_date_est"), "yyyyMMdd"))
     joined_df.createOrReplaceTempView("alloc_csm_view")
 
-    # Load SRM
+    logger.info("NOTE: T-1 logic assumes simple 1-day back without holiday/weekend checks. To be enhanced.")
+
     srm_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRM_QUERY_PATH.value
-    )
+    ).filter(col("file_eff_dt") >= "2021-01-01")
     srm_df.createOrReplaceTempView("srm")
+    logger.info(f"SRM filtered to post-2021: {srm_df.count()} records")
 
-    # Load SRMMF
     srmmf_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SRMMF_QUERY_PATH.value
-    )
+    ).filter(col("file_eff_dt") >= "2021-01-01")
     srmmf_df.createOrReplaceTempView("srmmf")
+    logger.info(f"SRMMF filtered to post-2021: {srmmf_df.count()} records")
 
-    # Read SQL from file (defined in Attributes)
     sql_path = Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_SRM_SRMMF_JOIN_SQL.value
     sql_query = Utils(logger).read_sql_file(sql_path)
 
@@ -119,8 +119,32 @@ def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args:
 
     logger.info(f"Final SRM+SRMMF join result count: {final_df.count()}")
 
+    # Corporate action detection logic
+    w = Window.partitionBy("sec_id").orderBy(col("previous_trade_date_est_str"))
+    final_df = final_df.withColumn("prev_ext_sec_id", lag("ext_sec_id").over(w))
+    final_df = final_df.withColumn("prev_isin_no", lag("isin_no").over(w))
+    final_df = final_df.withColumn("prev_ticker", lag("ticker").over(w))
+
+    final_df = final_df.withColumn(
+        "corp_action_flag",
+        (col("prev_ext_sec_id").isNotNull() & (col("prev_ext_sec_id") != col("ext_sec_id"))) |
+        (col("prev_isin_no").isNotNull() & (col("prev_isin_no") != col("isin_no"))) |
+        (col("prev_ticker").isNotNull() & (col("prev_ticker") != col("ticker")))
+    )
+
+    logger.info("Corporate action flagging complete. True = identifier change over time.")
+
+    # Assertion check
+    count_total = final_df.count()
+    count_flags = final_df.filter(col("corp_action_flag") == True).count()
+
+    assert count_total > 0, "Final joined DataFrame is empty"
+    assert count_flags < count_total, "All rows are flagged as corporate actions — unexpected behavior"
+
+    logger.info(f"Total corporate action flagged rows: {count_flags}")
+
     s3_helper.upload_process_logs_spdf(
-        final_df.limit(1000),
+        final_df.limit(10000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
         "final_output_neoxam_srm_srmmf"
@@ -145,7 +169,6 @@ if __name__ == "__main__":
     logger.info(f"Spark Version: {spark.version}")
     logger.info(f"Job Arguments: {args}")
 
-    
     logger.info("Glue Job Initialized")
     logger.info(f"Process type: {args['processType']}")
 
@@ -153,17 +176,18 @@ if __name__ == "__main__":
         pass
 
     elif args['processType'] == "historic":
-
-        
         allocations_df = load_allocations(spark, glue_helper, s3_helper, args)
         logger.info(f"Allocations loaded: {allocations_df.count()} records")
+
         csm_df = load_csm_security(spark, s3_helper, args)
         logger.info(f"CSM security loaded: {csm_df.count()} records")
+
         joined_df = join_allocations_with_security(spark, allocations_df, csm_df, s3_helper, args)
         logger.info(f"Joined allocations with CSM security: {joined_df.count()} records")
+
         final_df = load_and_join_srm(spark, glue_helper, s3_helper, joined_df, args)
-        #logger.info(f"Final joined DataFrame count: {final_df.count()} records")
         final_df.show(truncate=False)
+
         logger.info("ETL job completed successfully.")
 
     spark.stop()
