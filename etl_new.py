@@ -53,31 +53,6 @@ def load_csm_security(spark: SparkSession, s3_helper, args: dict) -> DataFrame:
     logger.info(f"CSM security cleaned: {df_clean.count()} records")
     s3_helper.upload_process_logs_spdf(df_clean.limit(1000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "csm_cleaned")
 
-    # ------------------- CSM SECURITY ASSERTIONS -------------------
-
-    df1 = df_clean.filter((col("sec_id") == "80931510") & (col("datadate").cast("string").isin(
-        "20241114", "20241115", "20241116", "20241117", "20241118", "20241119", "20241120"))).select("datadate", "ticker")
-    ticker_by_date_1 = {row["datadate"].strftime("%Y%m%d"): row["ticker"] for row in df1.collect()}
-    logger.info(f"[CSM Assertion 1] sec_id=80931510 ticker by date: {ticker_by_date_1}")
-    assert all(ticker_by_date_1[dt] == "SVW" for dt in ["20241114", "20241115", "20241116", "20241117"])
-    assert ticker_by_date_1["20241118"] == "SGH"
-    assert all(ticker_by_date_1[dt] == "SGH" for dt in ["20241119", "20241120"])
-
-    df2 = df_clean.filter((col("sec_id") == "3817154325") & (col("datadate").cast("string").isin(
-        "20250220", "20250221", "20250222", "20250223", "20250224", "20250225"))).select("datadate", "ticker")
-    ticker_by_date_2 = {row["datadate"].strftime("%Y%m%d"): row["ticker"] for row in df2.collect()}
-    logger.info(f"[CSM Assertion 2] sec_id=3817154325 ticker by date: {ticker_by_date_2}")
-    assert all(ticker_by_date_2[dt] == "QRTEB" for dt in ["20250220", "20250221", "20250222", "20250223"])
-    assert ticker_by_date_2["20250224"] == "QVCGB"
-    assert ticker_by_date_2["20250225"] == "QVCGB"
-
-    df3 = df_clean.filter((col("sec_id") == "3259235802") & (col("datadate").cast("string").isin(
-        "20250226", "20250227", "20250228"))).select("datadate", "ticker")
-    ticker_by_date_3 = {row["datadate"].strftime("%Y%m%d"): row["ticker"] for row in df3.collect()}
-    logger.info(f"[CSM Assertion 3] sec_id=3259235802 ticker by date: {ticker_by_date_3}")
-    assert all(ticker_by_date_3[dt] == "MPLN" for dt in ["20250226", "20250227"])
-    assert ticker_by_date_3["20250228"] == "CTEV"
-
     return df_clean
 
 
@@ -141,31 +116,26 @@ def load_and_join_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args:
 
     logger.info(f"Final SRM+SRMMF join result count: {final_df.count()}")
 
-    # ------------------- SRM ASSERTIONS -------------------
+    # ------------------- FINAL DATAFRAME ASSERTIONS -------------------
 
-    srm_1 = srm_df.filter((col("vanguard_id") == "V22427") & (col("year") == "2024") &
-                          (col("month") == "11") & (col("day").isin("14", "15", "18", "19", "20")).select("day", "ticker"))
-    tickers_srm_1 = {row["day"]: row["ticker"] for row in srm_1.collect()}
-    logger.info(f"[SRM Assertion 1] V22427 ticker by day: {tickers_srm_1}")
-    assert tickers_srm_1["14"] == "SVW"
-    for d in ["15", "18", "19", "20"]:
-        assert tickers_srm_1[d] == "SGH"
+    def get_ticker_map(df, id_col, id_val, date_col, date_vals):
+        return {row[date_col]: row["ticker"] for row in df.filter((col(id_col) == id_val) & col(date_col).isin(date_vals)).select(date_col, "ticker").collect()}
 
-    srm_2 = srm_df.filter((col("vanguard_id") == "V1031397501") & (col("year") == "2825") &
-                          (col("month") == "02") & (col("day").isin("20", "21", "24", "25")).select("day", "ticker"))
-    tickers_srm_2 = {row["day"]: row["ticker"] for row in srm_2.collect()}
-    logger.info(f"[SRM Assertion 2] V1031397501 ticker by day: {tickers_srm_2}")
-    assert tickers_srm_2["20"] == "QRTEB"
-    for d in ["21", "24", "25"]:
-        assert tickers_srm_2[d] == "QVCGB"
+    assert_map = [
+        ("80931510", "trade_date_est", ["2024-11-14", "2024-11-15", "2024-11-16", "2024-11-17", "2024-11-18", "2024-11-19", "2024-11-20"], "SVW", "SGH", "2024-11-18"),
+        ("3817154325", "trade_date_est", ["2025-02-20", "2025-02-21", "2025-02-22", "2025-02-23", "2025-02-24", "2025-02-25"], "QRTEB", "QVCGB", "2025-02-24"),
+        ("3259235802", "trade_date_est", ["2025-02-26", "2025-02-27", "2025-02-28"], "MPLN", "CTEV", "2025-02-28")
+    ]
 
-    srmmf_3 = srmmf_df.filter((col("vanguard_id") == "V1028403501") & (col("year") == "2025") &
-                              (col("month") == "02") & (col("day").isin("26", "27", "28")).select("day", "ticker"))
-    tickers_srmmf_3 = {row["day"]: row["ticker"] for row in srmmf_3.collect()}
-    logger.info(f"[SRM Assertion 3] V1028403501 ticker by day: {tickers_srmmf_3}")
-    assert tickers_srmmf_3["26"] == "MPLN"
-    for d in ["27", "28"]:
-        assert tickers_srmmf_3[d] == "CTEV"
+    for sec_id, date_col, dates, before_val, after_val, switch_date in assert_map:
+        sub_df = final_df.filter(col("sec_id") == sec_id).select(date_col, "ticker")
+        date_map = {row[date_col].strftime("%Y-%m-%d"): row["ticker"] for row in sub_df.filter(col(date_col).isin(dates)).collect()}
+        logger.info(f"[FinalDF Assertion] sec_id={sec_id} ticker by {date_col}: {date_map}")
+        for d in dates:
+            if d < switch_date:
+                assert date_map[d] == before_val, f"Expected {before_val} before {switch_date} for {sec_id}, got {date_map[d]} on {d}"
+            else:
+                assert date_map[d] == after_val, f"Expected {after_val} from {switch_date} for {sec_id}, got {date_map[d]} on {d}"
 
     s3_helper.upload_process_logs_spdf(
         final_df.limit(1000),
