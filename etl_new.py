@@ -191,9 +191,6 @@ if __name__ == "__main__":
     otq_file_name = Attributes.OTQ_FILE_NAME.value
     graph_name = Attributes.OTQ_GRAPH_NAME.value
     query_params = {
-    "start_date": args["startDate"],
-    "end_date": args["endDate"],
-    "sec_id_list": args["secIdList"],
     "giveFile": args["giveFile"],
     "prior_days": 5,
     "after_days": 10
