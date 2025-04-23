@@ -183,26 +183,26 @@ if __name__ == "__main__":
             spark, glue_helper, s3_helper, allocations_securities_df, args
         )
         logger.info("Security trade date identifiers job completed successfully.")
+        otq_file_name = Attributes.OTQ_FILE_NAME.value
+        graph_name = Attributes.OTQ_GRAPH_NAME.value
+        query_params = {
+        "giveFile": args["giveFile"],
+        "prior_days": 5,
+        "after_days": 10
+        }
+        otq_df = do_otq(otq_file_name, graph_name, query_params)
+        logger.info(f"OTQ DataFrame: {otq_df.show(5)}")
+        # ------------------- Write to S3 -------------------
+        s3_helper.upload_process_logs_spdf(
+            otq_df,
+            args["s3TCASecIdBucket"].replace("s3://", ""),
+            args["JOB_NAME"],
+            "otq_results"
+        )
 
     else:
         logger.error("Process Type not in (historic, daily) - Invalid Process Type")
         raise InvalidProcessTypeException(args['processType'])
     
-    otq_file_name = Attributes.OTQ_FILE_NAME.value
-    graph_name = Attributes.OTQ_GRAPH_NAME.value
-    query_params = {
-    "giveFile": args["giveFile"],
-    "prior_days": 5,
-    "after_days": 10
-    }
-    otq_df = do_otq(otq_file_name, graph_name, query_params)
-    logger.info(f"OTQ DataFrame: {otq_df.show(5)}")
-    # ------------------- Write to S3 -------------------
-    s3_helper.upload_process_logs_spdf(
-        otq_df,
-        args["s3TCASecIdBucket"].replace("s3://", ""),
-        args["JOB_NAME"],
-        "otq_results"
-    )
     spark.stop()
     logger.info("Spark session stopped.")
