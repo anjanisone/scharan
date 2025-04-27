@@ -13,8 +13,8 @@ from taslibrary.tas_onetick_query_helper import TasOneTickQueryHelper
 import taslibrary.tas_onetick_utility as tas_onetick_util
 
 
+otq_helper = TasOneTickQueryHelper(sys_level="eng", sys_type="glue")
 
-otq_helper = TasOneTickQueryHelper(sys_level = "eng", sys_type="glue")
 
 def extract_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict):
     logger.info("Loading and deduplicating allocation data")
@@ -127,17 +127,18 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, allocations_secur
 
     logger.info(f"Final SRM_EQUITY+SRM_MF join result count: {alloc_securities_srm_eq_mf_df.count()}")
 
+    # ------------------- Write Selected Columns (trade_date_local, trade_date_sedol, sec_id) as CSV -------------------
+    selected_df = alloc_securities_srm_eq_mf_df.select("trade_date_local", "trade_date_sedol", "sec_id")
+    logger.info(f"Writing selected SRM columns to S3 as CSV log (trade_date_local, trade_date_sedol, sec_id)")
     s3_helper.upload_process_logs_spdf(
-        alloc_securities_srm_eq_mf_df.limit(10000),
+        selected_df.limit(10000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "historic_allocations_srm_join"
+        "srm_selected_fields"
     )
 
-        # ------------------- Write to Hive/Glue Table -------------------
-    output_table = Attributes.SECURITY_IDENTIFIER_OUTPUT_TABLE.value  # Define this in Attributes.py
+    output_table = Attributes.SECURITY_IDENTIFIER_OUTPUT_TABLE.value  # Define properly in Attributes.py
     logger.info(f"Writing final output to table: {output_table}")
-
     alloc_securities_srm_eq_mf_df.write.mode("overwrite").saveAsTable(output_table)
 
     return alloc_securities_srm_eq_mf_df
@@ -145,7 +146,7 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, allocations_secur
 
 def do_otq(otq_name, graph_name, query_params):
     logger.info(f"Running OTQ query: {otq_name} with params: {query_params}")
-    otq_test_response = otq_helper.run(f'{otq_name}::{graph_name}', query_params, output_structure = "OutputStructure.symbol_result_list")
+    otq_test_response = otq_helper.run(f'{otq_name}::{graph_name}', query_params, output_structure="OutputStructure.symbol_result_list")
     logger.info("OTQ query completed successfully.")
 
     return tas_onetick_util.otq_from_list_to_df(otq_test_response)
@@ -183,16 +184,16 @@ if __name__ == "__main__":
             spark, glue_helper, s3_helper, allocations_securities_df, args
         )
         logger.info("Security trade date identifiers job completed successfully.")
+
         otq_file_name = Attributes.OTQ_FILE_NAME.value
         graph_name = Attributes.OTQ_GRAPH_NAME.value
         query_params = {
-        "giveFile": args["giveFile"],
-        "prior_days": 5,
-        "after_days": 10
+            "giveFile": args["giveFile"],
+            "prior_days": 5,
+            "after_days": 10
         }
         otq_df = do_otq(otq_file_name, graph_name, query_params)
         logger.info(f"OTQ DataFrame: {otq_df.show(5)}")
-        # ------------------- Write to S3 -------------------
         s3_helper.upload_process_logs_spdf(
             otq_df,
             args["s3TCASecIdBucket"].replace("s3://", ""),
@@ -203,6 +204,6 @@ if __name__ == "__main__":
     else:
         logger.error("Process Type not in (historic, daily) - Invalid Process Type")
         raise InvalidProcessTypeException(args['processType'])
-    
+
     spark.stop()
     logger.info("Spark session stopped.")
