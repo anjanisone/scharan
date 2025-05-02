@@ -101,8 +101,6 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFr
         selected_df.limit(10000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_selected_fields"
     )
 
-    final_df.write.mode("overwrite").saveAsTable(Attributes.SECURITY_IDENTIFIER_OUTPUT_TABLE.value)
-
     enriched_df = final_df.withColumn(
         "symbol_name", when(~col("currency").isin("AUD", "THB"), col("sedol")).otherwise(col("underlying_sedol"))
     ).withColumn(
@@ -114,6 +112,17 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFr
     s3_helper.upload_process_logs_spdf(
         enriched_df.limit(10000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_enriched_export"
     )
+
+    glue_helper.write_df_to_glue_catalog_table(
+        df=enriched_df,
+        target_path="",
+        db_name="",
+        db_table="",
+        db_catalog="",
+        write_mode="overwrite",
+        partition_cols=None,
+    )
+
     return enriched_df
 
 
@@ -128,19 +137,44 @@ def do_otq(otq_name, graph_name, query_params):
     return tas_onetick_util.otq_from_list_to_df(response)
 
 
-def split_and_run_otq_by_year(spark, s3_helper, args, base_df: DataFrame, otq_file: str, graph: str, base_s3_path: str):
-    year_list = [row["year"] for row in base_df.select(year("trade_date_local").alias("year")).distinct().collect()]
+def split_and_run_otq_by_year(
+    spark, s3_helper, args, base_df: DataFrame, otq_file: str, graph: str, base_s3_path: str
+) -> DataFrame:
+    year_list = [
+        row["year"]
+        for row in base_df.select(year("trade_date_local").alias("year")).distinct().collect()
+    ]
     logger.info(f"Processing OTQ per year: {year_list}")
+
+    combined_otq_df = None
+
     for yr in year_list:
         logger.info(f"Filtering for year: {yr}")
         year_df = base_df.filter(year("trade_date_local") == yr)
         file_tag = f"srm_symbol_feed_{yr}"
         year_df.write.mode("overwrite").option("header", True).csv(f"{base_s3_path}/{file_tag}")
+
         csv_path = f"{base_s3_path}/{file_tag}/"
         query_params = {"giveFile": csv_path, "prior_days": 5, "after_days": 10}
         otq_df = do_otq(otq_file, graph, query_params)
-        logger.info(f"OTQ results for year {yr}:")
-        otq_df.show(5)
+
+        if combined_otq_df is None:
+            combined_otq_df = otq_df
+        else:
+            combined_otq_df = combined_otq_df.unionByName(otq_df)
+
+    if combined_otq_df is not None:
+        glue_helper.write_df_to_glue_catalog_table(
+            df=combined_otq_df,
+            target_path="",
+            db_name="",
+            db_table="",
+            db_catalog="",
+            write_mode="overwrite",
+            partition_cols=None,
+        )
+
+    return combined_otq_df
 
 
 def main():
@@ -166,26 +200,23 @@ def main():
         joined_df = join_orders_with_security(allocations_df, securities_df, s3_helper, args)
         enriched_df = extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df, args)
 
-        # initial run
-        query_params = {
-            "giveFile": args["giveFile"],
-            "prior_days": 5,
-            "after_days": 10
-        }
-        otq_df = do_otq(Attributes.OTQ_FILE_NAME.value, Attributes.OTQ_GRAPH_NAME.value, query_params)
-        logger.info("Initial OTQ Output:")
-        otq_df.show(5)
-
-        # yearly run
         base_path = f"s3://{args['s3TCASecIdBucket'].replace('s3://', '')}/{args['JOB_NAME']}"
-        split_and_run_otq_by_year(
+        combined_otq_df = split_and_run_otq_by_year(
             spark, s3_helper, args,
             enriched_df,
             Attributes.OTQ_FILE_NAME.value,
             Attributes.OTQ_GRAPH_NAME.value,
             base_path
         )
-
+        glue_helper.write_df_to_glue_catalog_table(
+            df=combined_otq_df,
+            target_path="",
+            db_name="",
+            db_table="",
+            db_catalog="",
+            write_mode="overwrite",
+            partition_cols=None,
+        )
     spark.stop()
     logger.info("Spark session stopped.")
 
