@@ -10,6 +10,7 @@ from taslibrary import glue_service, s3_service, log_service, sns_helper as sns_
 from taslibrary.ingestion_exceptions.manager import InvalidProcessTypeException
 from utils import Utils
 
+window_all = Window.orderBy(monotonically_increasing_id())
 
 def extract_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) -> DataFrame:
     logger.info("Loading and deduplicating allocation data")
@@ -102,13 +103,15 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFr
     enriched_df = final_df.withColumn(
         "SYMBOL_NAME", col("sedol")
     ).withColumn(
-        "order_start_date", to_timestamp(col("trade_date_local").cast("string") + lit(" 00:00"))
+    "order_start_date",
+    to_timestamp(date_format(col("trade_date_local"), "dd/MM/yyyy") + lit(" 00:00"), "dd/MM/yyyy HH:mm")
     ).withColumn(
-        "order_end_date", to_timestamp(col("trade_date_local").cast("string") + lit(" 23:59"))
+    "order_end_date",
+    to_timestamp(date_format(col("trade_date_local"), "dd/MM/yyyy") + lit(" 23:59"), "dd/MM/yyyy HH:mm")
     ).withColumn(
         "sym_date", lit(datetime.today().strftime("%Y-%m-%d"))
     ).withColumn(
-        "DATA_ID", monotonically_increasing_id()
+        "DATA_ID", row_number().over(window_all)
     ).select(
         "DATA_ID", "currency", "ticker", "sedol", "trade_date_local",
         "order_start_date", "order_end_date", "sym_date", "SYMBOL_NAME"
