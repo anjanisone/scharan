@@ -1,4 +1,6 @@
+import os
 import sys
+from datetime import datetime
 
 from pyspark.sql import SparkSession, DataFrame, Window
 from pyspark.sql.functions import *
@@ -6,11 +8,7 @@ from pyspark.sql.functions import *
 from attributes import Attributes
 from taslibrary import glue_service, s3_service, log_service, sns_helper as sns_service
 from taslibrary.ingestion_exceptions.manager import InvalidProcessTypeException
-from taslibrary.tas_onetick_query_helper import TasOneTickQueryHelper
-import taslibrary.tas_onetick_utility as tas_onetick_util
 from utils import Utils
-
-otq_helper = TasOneTickQueryHelper(sys_level="eng", sys_type="glue")
 
 
 def extract_allocations(spark: SparkSession, glue_helper, s3_helper, args: dict) -> DataFrame:
@@ -102,15 +100,22 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFr
     )
 
     enriched_df = final_df.withColumn(
-        "symbol_name", when(~col("currency").isin("AUD", "THB"), col("sedol")).otherwise(col("underlying_sedol"))
+        "SYMBOL_NAME", col("sedol")
     ).withColumn(
-        "order_start_date", col("trade_date_local")
+        "order_start_date", to_timestamp(col("trade_date_local").cast("string") + lit(" 00:00"))
+    ).withColumn(
+        "order_end_date", to_timestamp(col("trade_date_local").cast("string") + lit(" 23:59"))
+    ).withColumn(
+        "sym_date", lit(datetime.today().strftime("%Y-%m-%d"))
+    ).withColumn(
+        "DATA_ID", monotonically_increasing_id()
     ).select(
-        "sec_id", "currency", "ticker", "sedol", "trade_date_local", "order_start_date", "symbol_name"
+        "DATA_ID", "currency", "ticker", "sedol", "trade_date_local",
+        "order_start_date", "order_end_date", "sym_date", "SYMBOL_NAME"
     )
 
     s3_helper.upload_process_logs_spdf(
-        enriched_df.limit(10000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_enriched_export"
+        enriched_df.limit(20), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_enriched_export"
     )
 
     glue_helper.write_df_to_glue_catalog_table(
@@ -126,58 +131,57 @@ def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFr
     return enriched_df
 
 
-def do_otq(otq_name, graph_name, query_params):
-    logger.info(f"Running OTQ query: {otq_name} with params: {query_params}")
+def otq_test(local_file_path: str) -> DataFrame:
+    query_params = {
+        "localFile": local_file_path,
+        "otq_reader": "/tap/one_tick_otqs_sec/CSV_READERS.otq::with_range_datetimes",
+        "input_timezone": "GMT",
+        "sym_prefix": "SED::::",
+        "date_format": "%Y-%m-%d",
+        "query_date_field": "order_start_date",
+        "query_date_end_field": "order_end_date",
+        "symbol_col": "#SYMBOL_NAME",
+        "uid": "DATA_ID",
+        "symbol_date_field": None
+    }
+
+    logger.info(f"Running OTQ with parameters: {query_params}")
+    from taslibrary.tas_onetick_query_helper import TasOneTickQueryHelper
+    import taslibrary.tas_onetick_utility as tas_onetick_util
+
+    otq_helper = TasOneTickQueryHelper(sys_level="eng", sys_type="glue")
     response = otq_helper.run(
-        f"{otq_name}::{graph_name}",
+        f"{Attributes.OTQ_FILE_NAME.value}::{Attributes.OTQ_GRAPH_NAME.value}",
         query_params,
         output_structure="OutputStructure.symbol_result_list"
     )
-    logger.info("OTQ query completed successfully.")
     return tas_onetick_util.otq_from_list_to_df(response)
 
 
 def split_and_run_otq_by_year(
-    spark, s3_helper, args, base_df: DataFrame, otq_file: str, graph: str, base_s3_path: str
+    spark, s3_helper, args, base_df: DataFrame, base_s3_path: str, input_years: list
 ) -> DataFrame:
-    year_list = [
-        row["year"]
-        for row in base_df.select(year("trade_date_local").alias("year")).distinct().collect()
-    ]
-    logger.info(f"Processing OTQ per year: {year_list}")
-
     combined_otq_df = None
 
-    for yr in year_list:
+    for yr in input_years:
         logger.info(f"Filtering for year: {yr}")
         year_df = base_df.filter(year("trade_date_local") == yr)
         file_tag = f"srm_symbol_feed_{yr}"
-        year_df.write.mode("overwrite").option("header", True).csv(f"{base_s3_path}/{file_tag}")
-
         csv_path = f"{base_s3_path}/{file_tag}/"
-        query_params = {"giveFile": csv_path, "prior_days": 5, "after_days": 10}
-        otq_df = do_otq(otq_file, graph, query_params)
+        year_df.write.mode("overwrite").option("header", True).csv(csv_path)
+
+        otq_df = otq_test(csv_path)
 
         if combined_otq_df is None:
             combined_otq_df = otq_df
         else:
             combined_otq_df = combined_otq_df.unionByName(otq_df)
 
-    if combined_otq_df is not None:
-        glue_helper.write_df_to_glue_catalog_table(
-            df=combined_otq_df,
-            target_path="",
-            db_name="",
-            db_table="",
-            db_catalog="",
-            write_mode="overwrite",
-            partition_cols=None,
-        )
-
     return combined_otq_df
 
 
 def main():
+    global logger
     logger = log_service.LogService(
         app_prefix=Attributes.APP_PREFIX.value,
         job_name=Attributes.GLUE_JOB_NAME.value
@@ -201,13 +205,15 @@ def main():
         enriched_df = extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df, args)
 
         base_path = f"s3://{args['s3TCASecIdBucket'].replace('s3://', '')}/{args['JOB_NAME']}"
+        input_years = [2024, 2025]  # Modify as needed
+
         combined_otq_df = split_and_run_otq_by_year(
             spark, s3_helper, args,
             enriched_df,
-            Attributes.OTQ_FILE_NAME.value,
-            Attributes.OTQ_GRAPH_NAME.value,
-            base_path
+            base_path,
+            input_years
         )
+
         glue_helper.write_df_to_glue_catalog_table(
             df=combined_otq_df,
             target_path="",
@@ -217,6 +223,7 @@ def main():
             write_mode="overwrite",
             partition_cols=None,
         )
+
     spark.stop()
     logger.info("Spark session stopped.")
 
