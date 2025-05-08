@@ -257,7 +257,7 @@ def merge_enriched_with_otq_results(
     spark_otq_df = spark.createDataFrame(otq_test_df)
 
     # Add DATA_ID to Spark OTQ DataFrame
-    enriched = enriched.withColumn(
+    enriched_df = enriched_df.withColumn(
         "DATA_ID", row_number().over(Window.orderBy(monotonically_increasing_id()))
     )
 
