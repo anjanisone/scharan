@@ -82,105 +82,207 @@ def join_orders_with_security(alloc_df: DataFrame, sec_df: DataFrame, s3_helper,
     return joined_df
 
 
-def extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df: DataFrame, args: dict) -> DataFrame:
-    logger.info("Joining with SRM_EQUITY and SRM_MF using Spark SQL")
-    joined_df = joined_df.withColumn("previous_trade_date_est", date_add(col("trade_date_est"), -1))
-    joined_df = joined_df.withColumn("previous_trade_date_est_str", date_format(col("previous_trade_date_est"), "yyyyMMdd"))
-    joined_df.createOrReplaceTempView("alloc_securities_tmp")
+def extract_and_join_orders_sec_srm(spark, glue_helper, s3_helper, allocations_securities_df: DataFrame, args: dict) -> DataFrame:
+    logger.info("Joining with SRM_EQUITY and SRM_MF using Spark SQL from SQL file")
 
-    final_df = glue_helper.read_sql_to_df(
+    allocations_securities_df = allocations_securities_df.withColumn(
+        "previous_trade_date_est", date_add(col("trade_date_est"), -1)
+    )
+    allocations_securities_df = allocations_securities_df.withColumn(
+        "previous_trade_date_est_str", date_format(col("previous_trade_date_est"), "yyyyMMdd")
+    )
+    allocations_securities_df.createOrReplaceTempView("alloc_securities_tmp")
+
+    srm_eq_df = glue_helper.read_csv_to_df(
+        spark,
+        "s3://vgi-invcan-eng-tca-us-east-1/TCA_Business_Automation_SG/data_infrastructure/process_automation/Q01-glue_tca_eq_security_trade-date_identifiers/csv/srm_equity_eng.csv"
+    )
+    srm_eq_df.createOrReplaceTempView("srm_equity_tmp")
+
+    srm_mf_df = glue_helper.read_csv_to_df(
+        spark,
+        "s3://vgi-invcan-eng-tca-us-east-1/TCA_Business_Automation_SG/data_infrastructure/process_automation/Q01-glue_tca_eq_security_trade-date_identifiers/csv/srm_mf_eng.csv"
+    )
+    srm_mf_df.createOrReplaceTempView("srm_mf_tmp")
+
+    alloc_securities_srm_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
-        Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_SECURITY_SRM_JOIN_SQL.value,
-    )
-    logger.info(f"Final SRM_EQUITY+SRM_MF join result count: {final_df.count()}")
-
-    selected_df = final_df.select("trade_date_local", "trade_date_sedol", "sec_id")
-    s3_helper.upload_process_logs_spdf(
-        selected_df.limit(10000), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_selected_fields"
+        Attributes.SQL_SCRIPTS_PATH.value + Attributes.ALLOC_SECURITY_SRM_JOIN_SQL.value
     )
 
-    enriched_df = final_df.withColumn(
-        "SYMBOL_NAME", col("sedol")
-    ).withColumn(
-    "order_start_date",
-    to_timestamp(date_format(col("trade_date_local"), "dd/MM/yyyy") + lit(" 00:00"), "dd/MM/yyyy HH:mm")
-    ).withColumn(
-    "order_end_date",
-    to_timestamp(date_format(col("trade_date_local"), "dd/MM/yyyy") + lit(" 23:59"), "dd/MM/yyyy HH:mm")
-    ).withColumn(
-        "sym_date", lit(datetime.today().strftime("%Y-%m-%d"))
-    ).withColumn(
-        "DATA_ID", row_number().over(window_all)
-    ).select(
-        "DATA_ID", "currency", "ticker", "sedol", "trade_date_local",
-        "order_start_date", "order_end_date", "sym_date", "SYMBOL_NAME"
-    )
+    logger.info(f"Final SRM_EQUITY + SRM_MF join result count: {alloc_securities_srm_df.count()}")
 
     s3_helper.upload_process_logs_spdf(
-        enriched_df.limit(20), args["s3TCASecIdBucket"].replace("s3://", ""), args["JOB_NAME"], "srm_enriched_export"
+        alloc_securities_srm_df.limit(10000),
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "historic_alloc_securities_srm_enriched"
     )
 
     glue_helper.write_df_to_glue_catalog_table(
-        df=enriched_df,
-        target_path="",
-        db_name="",
-        db_table="",
-        db_catalog="",
-        write_mode="overwrite",
-        partition_cols=None,
+        df=alloc_securities_srm_df,
+        target_path="s3://vgi-invcan-eng-tca-us-east-1/etl/gis_tas_eq_etl/sec_trade_date_identifiers",
+        db_name="gis_tas_eq_etl",
+        db_table="security_identifiers",
+        db_catalog="885905049688",
+        write_mode="overwrite"
     )
+
+    return alloc_securities_srm_df
 
     return enriched_df
 
 
-def otq_test(local_file_path: str) -> DataFrame:
+def onetick_input_df(enriched_df: DataFrame, s3_helper, args: dict) -> DataFrame:
+    subset_df = enriched_df.withColumn("SYMBOL_NAME", col("sedol")) \
+        .withColumn(
+            "order_start_date",
+            to_timestamp(concat_ws(" ", col("trade_date_local").cast("string"), lit("00:00")), "yyyy-MM-dd HH:mm")
+        ).withColumn(
+            "order_end_date",
+            to_timestamp(concat_ws(" ", col("trade_date_local").cast("string"), lit("23:59")), "yyyy-MM-dd HH:mm")
+        ).withColumn(
+            "sym_date", lit(datetime.today().strftime("%Y-%m-%d"))
+        ).withColumn(
+            "DATA_ID", row_number().over(window_all)
+        ).select(
+            "DATA_ID",
+            "sec_id",
+            col("sec_currency").alias("currency"),
+            "ticker",
+            "sedol",
+            "trade_date_local",
+            date_format(col("order_start_date"), "yyyy-MM-dd HH:mm:ss").alias("order_start_Date"),
+            date_format(col("order_end_date"), "yyyy-MM-dd HH:mm:ss").alias("order_end_Date"),
+            "sym_date",
+            "SYMBOL_NAME"
+        )
+
+    s3_helper.upload_process_logs_spdf(
+        subset_df.limit(20),
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "srm_enriched_export"
+    )
+
+    return subset_df
+
+
+def otq_test(onetick_datasubset_test: DataFrame, s3_helper, args: dict) -> DataFrame:
+    print("Import OneTick libraries from S3")
+
+    ot_key_id = "40d1148-bf89-420d-84ca-ecl8e23674ef"
+    ot_arn = "arn:aws:kms:us-east-1:503680829471:key"
+    ot_s3_loc = "s3://vgi-invcan-eng-tca-us-east-1/tmp/test_onetick"
+
+    cmd = f"aws s3 cp {ot_s3_loc}/ /tmp --sse aws:kms --sse-kms-key-id {ot_arn}/{ot_key_id} --recursive"
+    return_code = os.system(cmd)
+    if return_code != 0:
+        print(f"Error with return code: {return_code}")
+        raise Exception(f"Failed to copy OneTickClient from S3: {ot_s3_loc}")
+
+    print("Execute command to hard link to onetick directory")
+    cmd = "ln -s /usr/lib64/libpython3.11.so.1.0 /tmp/one_tick/bin/libpython3.11.so"
+    return_code = os.system(cmd)
+    if return_code != 0:
+        raise Exception("Failed to hardlink onetick directory")
+    print("Hard link to onetick directory successful")
+
+    print("Importing OneTick Query Wrapper")
+    sys.path.insert(0, '/tmp/util')
+    import taslibrary.tas_onetick_utility as tas_onetick_util
+    from taslibrary.tas_onetick_query_helper import TasOneTickQueryHelper
+
+    otq_helper = TasOneTickQueryHelper(sys_level="eng", sys_type="glue")
+    os.mkdir('/tmp/input')
+
+    limited_df = onetick_datasubset_test.limit(50)
+    pandas_df = limited_df.toPandas()
+    pandas_df.to_csv('/tmp/input/sample_subset_data.csv', sep=',', header=True, index=False)
+
+    otq_path = "/tmp/one_tick_otqs_sec/Symbol_lookup.otq"
+    graph_name = "lookup_by_symbol"
     query_params = {
-        "localFile": local_file_path,
-        "otq_reader": "/tap/one_tick_otqs_sec/CSV_READERS.otq::with_range_datetimes",
+        "localfile": "/tmp/input/sample_subset_data.csv",
+        "otq_reader": "/tmp/one_tick_otqs_sec/CSV_READERS.otq::with_range_datetimes",
         "input_timezone": "GMT",
         "sym_prefix": "SED::::",
         "date_format": "%Y-%m-%d",
         "query_date_field": "order_start_date",
         "query_date_end_field": "order_end_date",
-        "symbol_col": "#SYMBOL_NAME",
+        "symbol_col": "SYMBOL_NAME",
         "uid": "DATA_ID",
         "symbol_date_field": None
     }
 
-    logger.info(f"Running OTQ with parameters: {query_params}")
-    from taslibrary.tas_onetick_query_helper import TasOneTickQueryHelper
-    import taslibrary.tas_onetick_utility as tas_onetick_util
+    logger.info(f"Running OTQ query: {otq_path} with params: {query_params}")
+    print(f"Running OTQ query: {otq_path} with params: {query_params}")
 
-    otq_helper = TasOneTickQueryHelper(sys_level="eng", sys_type="glue")
-    response = otq_helper.run(
-        f"{Attributes.OTQ_FILE_NAME.value}::{Attributes.OTQ_GRAPH_NAME.value}",
-        query_params,
-        output_structure="OutputStructure.symbol_result_list"
+    otq_test_response = otq_helper.otq.run(
+        f"{otq_path}::{graph_name}",
+        query_params=query_params
     )
-    return tas_onetick_util.otq_from_list_to_df(response)
+
+    logger.info("OTQ query completed successfully.")
+    print("OTQ query completed successfully.")
+
+    otq_test_df = tas_onetick_util.otq_from_list_to_df(otq_test_response)
+    s3_helper.upload_process_logs_spdf(
+        otq_test_df,
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "otq_results"
+    )
+
+    print("OTQ Result Count:", otq_test_df.count())
+    return otq_test_df
 
 
-def split_and_run_otq_by_year(
-    spark, s3_helper, args, base_df: DataFrame, base_s3_path: str, input_years: list
+
+
+def merge_enriched_with_otq_results(
+    spark: SparkSession,
+    otq_test_df: pd.DataFrame,
+    enriched_df: DataFrame,
+    s3_helper,
+    glue_helper,
+    args: dict
 ) -> DataFrame:
-    combined_otq_df = None
+    """
+    Converts OTQ results (pandas DataFrame) to Spark DataFrame,
+    assigns DATA_ID, joins with enriched_df on DATA_ID, and uploads preview logs.
+    """
+    from pyspark.sql.window import Window
 
-    for yr in input_years:
-        logger.info(f"Filtering for year: {yr}")
-        year_df = base_df.filter(year("trade_date_local") == yr)
-        file_tag = f"srm_symbol_feed_{yr}"
-        csv_path = f"{base_s3_path}/{file_tag}/"
-        year_df.write.mode("overwrite").option("header", True).csv(csv_path)
+    # Convert pandas to Spark
+    spark_otq_df = spark.createDataFrame(otq_test_df)
 
-        otq_df = otq_test(csv_path)
+    # Add DATA_ID to Spark OTQ DataFrame
+    spark_otq_df = spark_otq_df.withColumn(
+        "DATA_ID", row_number().over(Window.orderBy(monotonically_increasing_id()))
+    )
 
-        if combined_otq_df is None:
-            combined_otq_df = otq_df
-        else:
-            combined_otq_df = combined_otq_df.unionByName(otq_df)
+    # Join with enriched_df on DATA_ID
+    merged_df = enriched_df.join(spark_otq_df, on="DATA_ID", how="inner")
 
-    return combined_otq_df
+    # Upload log of merged result (sample)
+    s3_helper.upload_process_logs_spdf(
+        merged_df.limit(100),
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "final_merged_output"
+    )
+    glue_helper.write_df_to_iceberg_table(
+    df=final_df,
+    target_path="s3://",  
+    db_name="",                       
+    db_table="",                   
+    db_catalog="",                    
+    write_mode="overwrite",                       
+    partition_cols=None                           
+    )
+    return merged_df
 
 
 def main():
@@ -196,36 +298,28 @@ def main():
     spark = util.get_spark_session()
     glue_helper = glue_service.GlueService(logger)
     s3_helper = s3_service.S3Service(logger, args["sysLevel"])
-    sns_helper = sns_service.SnsHelper(args["sysLevel"])
+    sns_helper = sns_service.SNSHelper(args["sysLevel"])
 
+    logger.info(f"Python Version: {sys.version}")
+    logger.info(f"PySpark Version: {pyspark.__version__}")
+    logger.info(f"Job Arguments: {args}")
     logger.info("Glue Job Initialized")
-    logger.info(f"Process type: {args['processType']}")
+    logger.info(f"Starting security trade date identifiers ETL job. Process type: {args['processType']}")
 
     if args["processType"] == "historic":
         allocations_df = extract_allocations(spark, glue_helper, s3_helper, args)
         securities_df = extract_securities(spark, s3_helper, args)
-        joined_df = join_orders_with_security(allocations_df, securities_df, s3_helper, args)
-        enriched_df = extract_and_join_orders_srm(spark, glue_helper, s3_helper, joined_df, args)
-
-        base_path = f"s3://{args['s3TCASecIdBucket'].replace('s3://', '')}/{args['JOB_NAME']}"
-        input_years = [2024, 2025]  # Modify as needed
-
-        combined_otq_df = split_and_run_otq_by_year(
-            spark, s3_helper, args,
-            enriched_df,
-            base_path,
-            input_years
-        )
-
-        glue_helper.write_df_to_glue_catalog_table(
-            df=combined_otq_df,
-            target_path="",
-            db_name="",
-            db_table="",
-            db_catalog="",
-            write_mode="overwrite",
-            partition_cols=None,
-        )
+        allocations_securities_df = join_orders_with_security(allocations_df, securities_df, s3_helper, args)
+        enriched_df = extract_and_join_orders_sec_srm(spark, glue_helper, s3_helper, allocations_securities_df, args)
+        otq_input_df = onetick_input_df(enriched_df, s3_helper, args)
+        otq_result_pandas_df = otq_test(otq_input_df, s3_helper, args)
+        final_df = merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
+        logger.info("security trade date identifiers job completed successfully")
+    elif args["processType"] == "daily":
+        pass
+    else:
+        logger.error("Process Type not in (historic, daily) - Invalid Process Type")
+        raise InvalidProcessTypeException(args['processType'])
 
     spark.stop()
     logger.info("Spark session stopped.")
