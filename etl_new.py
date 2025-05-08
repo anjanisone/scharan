@@ -255,6 +255,7 @@ def merge_enriched_with_otq_results(
 
     # Convert pandas to Spark
     spark_otq_df = spark.createDataFrame(otq_test_df)
+    print(f"Schema for Converted Df from Pandas to Spark RDD, {spark_otq_df.printSchema()}")
 
     # Add DATA_ID to Spark OTQ DataFrame
     enriched_df = enriched_df.withColumn(
