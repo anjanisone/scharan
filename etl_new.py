@@ -272,7 +272,7 @@ def merge_enriched_with_otq_results(
         "final_merged_output"
     )
     glue_helper.write_df_to_iceberg_table(
-    df=final_df,
+    df=merged_df,
     target_path="s3://",  
     db_name="",                       
     db_table="",                   
