@@ -131,8 +131,6 @@ def extract_and_join_orders_sec_srm(spark, glue_helper, s3_helper, allocations_s
 
     return alloc_securities_srm_df
 
-    return enriched_df
-
 
 def onetick_input_df(enriched_df: DataFrame, s3_helper, args: dict) -> DataFrame:
     subset_df = enriched_df.withColumn("SYMBOL_NAME", col("sedol")) \
