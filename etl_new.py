@@ -166,8 +166,52 @@ def onetick_input_df(enriched_df: DataFrame, s3_helper, args: dict) -> DataFrame
 
     return subset_df
 
+def onetick_input_df_with_ticker(enriched_df: DataFrame, s3_helper, args: dict) -> DataFrame:
+    filtered_df = enriched_df.filter(col("currency").isin("THB", "AUD"))
 
-def otq_test(onetick_datasubset_test: DataFrame, s3_helper, args: dict) -> DataFrame:
+    transformed_df = filtered_df.withColumn(
+        "SYMBOL_NAME",
+        when(
+            (col("currency") == "THB") & col("ticker").endsWith("/F"),
+            regexp_replace(col("ticker"), "/F$", " TB")
+        ).when(
+            (col("currency") == "AUD") & col("ticker").rlike("(ZZ|BB|YY|XX\\*?|0A|0B|O|DA|-W)$"),
+            regexp_replace(col("ticker"), "(ZZ|BB|YY|XX\\*?|0A|0B|O|DA|-W)$", " AU")
+        ).otherwise(col("ticker"))
+    ).withColumn(
+        "order_start_date",
+        to_timestamp(concat_ws(" ", col("trade_date_local").cast("string"), lit("00:00")), "yyyy-MM-dd HH:mm")
+    ).withColumn(
+        "order_end_date",
+        to_timestamp(concat_ws(" ", col("trade_date_local").cast("string"), lit("23:59")), "yyyy-MM-dd HH:mm")
+    ).withColumn(
+        "sym_date", lit(datetime.today().strftime("%Y-%m-%d"))
+    ).withColumn(
+        "DATA_ID", row_number().over(window_all)
+    ).select(
+        "DATA_ID",
+        "sec_id",
+        col("sec_currency").alias("currency"),
+        "ticker",
+        "sedol",
+        "trade_date_local",
+        date_format(col("order_start_date"), "yyyy-MM-dd HH:mm:ss").alias("order_start_Date"),
+        date_format(col("order_end_date"), "yyyy-MM-dd HH:mm:ss").alias("order_end_Date"),
+        "sym_date",
+        "SYMBOL_NAME"
+    )
+
+    s3_helper.upload_process_logs_spdf(
+        transformed_df.limit(20),
+        args["s3TCASecIdBucket"].replace("s3://", ""),
+        args["JOB_NAME"],
+        "srm_enriched_export_ticker"
+    )
+
+    return transformed_df
+
+
+def otq_test(sym_prefix:str, onetick_datasubset_test: DataFrame, s3_helper, args: dict) -> DataFrame:
     print("Import OneTick libraries from S3")
 
     ot_key_id = "40d1148-bf89-420d-84ca-ecl8e23674ef"
@@ -205,7 +249,7 @@ def otq_test(onetick_datasubset_test: DataFrame, s3_helper, args: dict) -> DataF
         "localfile": "/tmp/input/sample_subset_data.csv",
         "otq_reader": "/tmp/one_tick_otqs_sec/CSV_READERS.otq::with_range_datetimes",
         "input_timezone": "GMT",
-        "sym_prefix": "SED::::",
+        "sym_prefix": f"{sym_prefix}::::",
         "date_format": "%Y-%m-%d",
         "query_date_field": "order_start_date",
         "query_date_end_field": "order_end_date",
@@ -311,8 +355,11 @@ def main():
         allocations_securities_df = join_orders_with_security(allocations_df, securities_df, s3_helper, args)
         enriched_df = extract_and_join_orders_sec_srm(spark, glue_helper, s3_helper, allocations_securities_df, args)
         otq_input_df = onetick_input_df(enriched_df, s3_helper, args)
-        otq_result_pandas_df = otq_test(otq_input_df, s3_helper, args)
+        otq_ticker_df = onetick_input_df_with_ticker(enriched_df, s3_helper, args)
+        otq_result_pandas_df = otq_test("SED", otq_input_df, s3_helper, args)
+        otq_ticker_pandas_df = otq_test("BTKR", otq_ticker_df, s3_helper, args)
         final_df = merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
+        final_ticker_df = merge_enriched_with_otq_results(spar, otq_ticker_pandas_df, enriched_df, s3_helper, glue_helper, args)
         logger.info("security trade date identifiers job completed successfully")
     elif args["processType"] == "daily":
         pass
