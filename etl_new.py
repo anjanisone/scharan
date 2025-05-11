@@ -290,6 +290,7 @@ def merge_enriched_with_otq_results(
     s3_helper,
     glue_helper,
     args: dict
+    has_col: bool = False
 ) -> DataFrame:
     """
     Converts OTQ results (pandas DataFrame) to Spark DataFrame,
@@ -302,9 +303,10 @@ def merge_enriched_with_otq_results(
     print(f"Schema for Converted Df from Pandas to Spark RDD, {spark_otq_df.printSchema()}")
 
     # Add DATA_ID to Spark OTQ DataFrame
-    enriched_df = enriched_df.withColumn(
-        "DATA_ID", row_number().over(Window.orderBy(monotonically_increasing_id()))
-    )
+    if not has_col:
+        enriched_df = enriched_df.withColumn(
+            "DATA_ID", row_number().over(Window.orderBy(monotonically_increasing_id()))
+        )
 
     # Join with enriched_df on DATA_ID
     merged_df = enriched_df.join(spark_otq_df, on="DATA_ID", how="inner")
@@ -359,7 +361,7 @@ def main():
         otq_result_pandas_df = otq_test("SED", otq_input_df, s3_helper, args)
         otq_ticker_pandas_df = otq_test("BTKR", otq_ticker_df, s3_helper, args)
         final_df = merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
-        final_ticker_df = merge_enriched_with_otq_results(spar, otq_ticker_pandas_df, enriched_df, s3_helper, glue_helper, args)
+        final_ticker_df = merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, enriched_df, s3_helper, glue_helper, args, has_col = True)
         logger.info("security trade date identifiers job completed successfully")
     elif args["processType"] == "daily":
         pass
