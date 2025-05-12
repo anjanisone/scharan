@@ -1,6 +1,7 @@
 import os
 import sys
 from datetime import datetime
+import pandas as pd
 
 from pyspark.sql import SparkSession, DataFrame, Window
 from pyspark.sql.functions import *
@@ -288,7 +289,8 @@ def merge_enriched_with_otq_results(
     s3_helper,
     glue_helper,
     args: dict,
-    has_col: bool = False
+    has_col: bool = False,
+    is_final: bool = False
 ) -> DataFrame:
     from pyspark.sql.window import Window
     from pyspark.sql.functions import col, row_number, monotonically_increasing_id
@@ -298,10 +300,11 @@ def merge_enriched_with_otq_results(
     print(f"Schema for Converted Df from Pandas to Spark RDD, {spark_otq_df.printSchema()}")
 
     # Rename non-DATA_ID columns to avoid name collisions
-    spark_otq_df = spark_otq_df.select([
-        col(c).alias(f"otq_{c}") if c != "DATA_ID" else col(c)
-        for c in spark_otq_df.columns
-    ])
+    if is_final:
+        spark_otq_df = spark_otq_df.select([
+            col(c).alias(f"otq_{c}") if c != "DATA_ID" else col(c)
+            for c in spark_otq_df.columns
+        ])
 
     # Add DATA_ID to enriched_df if not present
     if not has_col:
@@ -323,12 +326,12 @@ def merge_enriched_with_otq_results(
     # Write full result to Iceberg table
     glue_helper.write_df_to_iceberg_table(
         df=merged_df,
-        target_path="s3://",        # Replace with actual S3 path
-        db_name="",                 # Replace with actual DB name
-        db_table="",                # Replace with actual table name
-        db_catalog="",              # Replace with actual catalog
-        write_mode="overwrite",    # Or 'append'
-        partition_cols=None        # Set if needed
+        target_path="s3://",        
+        db_name="",                 
+        db_table="",                
+        db_catalog="",              
+        write_mode="overwrite",    
+        partition_cols=None        
     )
 
     return merged_df
@@ -365,7 +368,8 @@ def main():
         otq_result_pandas_df = otq_test("SED", otq_input_df, s3_helper, args)
         otq_ticker_pandas_df = otq_test("BTKR", otq_ticker_df, s3_helper, args)
         final_df = merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
-        final_ticker_df = merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, final_df, s3_helper, glue_helper, args, has_col = True)
+        final_ticker_df = merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, final_df, s3_helper, glue_helper, args, has_col = True, is_final = True)
+        logger.info(f"Final merged DataFrame count: {final_ticker_df.count()}")
         logger.info("security trade date identifiers job completed successfully")
     elif args["processType"] == "daily":
         pass
