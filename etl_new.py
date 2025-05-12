@@ -281,52 +281,56 @@ def otq_test(sym_prefix:str, onetick_datasubset_test: DataFrame, s3_helper, args
     return otq_test_df
 
 
-
-
 def merge_enriched_with_otq_results(
     spark: SparkSession,
     otq_test_df: pd.DataFrame,
     enriched_df: DataFrame,
     s3_helper,
     glue_helper,
-    args: dict
+    args: dict,
     has_col: bool = False
 ) -> DataFrame:
-    """
-    Converts OTQ results (pandas DataFrame) to Spark DataFrame,
-    assigns DATA_ID, joins with enriched_df on DATA_ID, and uploads preview logs.
-    """
     from pyspark.sql.window import Window
+    from pyspark.sql.functions import col, row_number, monotonically_increasing_id
 
-    # Convert pandas to Spark
+    # Convert pandas OTQ result to Spark DataFrame
     spark_otq_df = spark.createDataFrame(otq_test_df)
     print(f"Schema for Converted Df from Pandas to Spark RDD, {spark_otq_df.printSchema()}")
 
-    # Add DATA_ID to Spark OTQ DataFrame
+    # Rename non-DATA_ID columns to avoid name collisions
+    spark_otq_df = spark_otq_df.select([
+        col(c).alias(f"otq_{c}") if c != "DATA_ID" else col(c)
+        for c in spark_otq_df.columns
+    ])
+
+    # Add DATA_ID to enriched_df if not present
     if not has_col:
         enriched_df = enriched_df.withColumn(
             "DATA_ID", row_number().over(Window.orderBy(monotonically_increasing_id()))
         )
 
-    # Join with enriched_df on DATA_ID
+    # Join on DATA_ID
     merged_df = enriched_df.join(spark_otq_df, on="DATA_ID", how="inner")
 
-    # Upload log of merged result (sample)
+    # Upload preview to S3
     s3_helper.upload_process_logs_spdf(
         merged_df.limit(100),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
         "final_merged_output"
     )
+
+    # Write full result to Iceberg table
     glue_helper.write_df_to_iceberg_table(
-    df=merged_df,
-    target_path="s3://",  
-    db_name="",                       
-    db_table="",                   
-    db_catalog="",                    
-    write_mode="overwrite",                       
-    partition_cols=None                           
+        df=merged_df,
+        target_path="s3://",        # Replace with actual S3 path
+        db_name="",                 # Replace with actual DB name
+        db_table="",                # Replace with actual table name
+        db_catalog="",              # Replace with actual catalog
+        write_mode="overwrite",    # Or 'append'
+        partition_cols=None        # Set if needed
     )
+
     return merged_df
 
 
