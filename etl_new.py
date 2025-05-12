@@ -361,7 +361,7 @@ def main():
         otq_result_pandas_df = otq_test("SED", otq_input_df, s3_helper, args)
         otq_ticker_pandas_df = otq_test("BTKR", otq_ticker_df, s3_helper, args)
         final_df = merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
-        final_ticker_df = merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, enriched_df, s3_helper, glue_helper, args, has_col = True)
+        final_ticker_df = merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, final_df, s3_helper, glue_helper, args, has_col = True)
         logger.info("security trade date identifiers job completed successfully")
     elif args["processType"] == "daily":
         pass
