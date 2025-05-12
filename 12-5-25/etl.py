@@ -244,9 +244,11 @@ def main():
         otq_ticker_df = onetick_input_df_with_ticker(enriched_df, s3_helper, args)
         otq_result_pandas_df = util.otq_test("SED", otq_input_df, s3_helper, args)
         otq_ticker_pandas_df = util.otq_test("BTKR", otq_ticker_df, s3_helper, args)
-        final_df = util.merge_enriched_with_otq_results(spark, otq_result_pandas_df, enriched_df, s3_helper, glue_helper, args)
-        final_ticker_df = util.merge_enriched_with_otq_results(spark, otq_ticker_pandas_df, final_df, s3_helper, glue_helper, args, has_col = True, is_final = True)
-        logger.info(f"Final merged DataFrame count: {final_ticker_df.count()}")
+        sedol_spark_df = spark.createDataFrame(otq_result_pandas_df)
+        ticker_spark_df = spark.createDataFrame(otq_ticker_pandas_df)
+        combined_df = sedol_spark_df.unionByName(ticker_spark_df, allowMissingColumns=True)
+        final_df = util.merge_enriched_with_otq_results(spark, combined_df, enriched_df, s3_helper, glue_helper, args)
+        logger.info(f"Final merged DataFrame count: {final_df.count()}")
         logger.info("security trade date identifiers job completed successfully")
     elif args["processType"] == "daily":
         pass
