@@ -56,39 +56,48 @@ def extract_securities(spark: SparkSession, s3_helper, glue_helper,  args: dict)
 def join_orders_with_security(spark: SparkSession, alloc_df: DataFrame, sec_df: DataFrame, s3_helper, glue_helper, args: dict) -> DataFrame:
     logger.info("Joining allocations with CRD securities using Spark DataFrame API")
 
-    # Step 1: Cast sec_id to string and create lookup_date
+    # Step 1: Cast sec_id to string and add lookup_date
     alloc_df = alloc_df.withColumn("sec_id_str", col("sec_id").cast("string"))
     alloc_df = alloc_df.withColumn("lookup_date", date_sub(col("trade_date_est"), 1))
 
-    # Step 2: Read available partitions for csm_security
-    logger.info("Reading available partitions from csm_security")
-    partitions_df = glue_helper.read_sql_to_df(
+    # Step 2: Read SHOW PARTITIONS query from SQL file
+    logger.info("Reading SHOW PARTITIONS csm_security as DataFrame")
+    raw_partitions_df = glue_helper.read_sql_to_df(
         spark,
         args["awsApplicationPayloadS3Bucket"],
         Attributes.SQL_SCRIPTS_PATH.value + Attributes.SHOW_CSM_SECURITY_PARTITIONS_QUERY_PATH.value
-    ).cache()
-
-    # Step 3: Broadcast partitions (usually small) and join to get valid_datadate
-    partitions_df = partitions_df.withColumnRenamed("partition_date", "available_partition_date")
-    combined_df = (
-        alloc_df.crossJoin(broadcast(partitions_df))
-        .filter(col("available_partition_date") <= col("lookup_date"))
     )
 
-    # Step 4: For each alloc row, get max available_partition_date as valid_datadate
+    # Step 3: Transform the raw partition values into date format
+    partition_col_name = raw_partitions_df.columns[0]
+    partitions_df = (
+        raw_partitions_df
+        .withColumnRenamed(partition_col_name, "partition")
+        .withColumn("partition_date", expr("CAST(SPLIT(partition, '=')[1] AS DATE)"))
+        .drop("partition")
+        .cache()
+    )
+
+    # Step 4: Broadcast partitions and join with allocations to find valid partition date
+    partitions_df = broadcast(partitions_df)
+    combined_df = (
+        alloc_df.crossJoin(partitions_df)
+        .filter(col("partition_date") <= col("lookup_date"))
+    )
+
     group_cols = [col(c) for c in alloc_df.columns]
     enriched_alloc_df = (
         combined_df
         .groupBy(*group_cols)
-        .agg(spark_max("available_partition_date").alias("valid_datadate"))
+        .agg(spark_max("partition_date").alias("valid_datadate"))
         .drop("lookup_date")
     )
 
-    # Step 5: Prepare temp views for Spark SQL join
+    # Step 5: Prepare temp views for final SQL join
     enriched_alloc_df.createOrReplaceTempView("allocations_tmp")
     sec_df.createOrReplaceTempView("crd_securities_tmp")
 
-    # Step 6: Final join with CRD securities
+    # Step 6: Final join using SQL file
     logger.info("Executing final allocation + CRD securities join")
     joined_df = glue_helper.read_sql_to_df(
         spark,
@@ -101,7 +110,7 @@ def join_orders_with_security(spark: SparkSession, alloc_df: DataFrame, sec_df: 
         joined_df.limit(10000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "historic_allocations_securities",
+        "historic_allocations_securities"
     )
 
     null_df = joined_df.filter(
@@ -111,7 +120,7 @@ def join_orders_with_security(spark: SparkSession, alloc_df: DataFrame, sec_df: 
         null_df.limit(1000),
         args["s3TCASecIdBucket"].replace("s3://", ""),
         args["JOB_NAME"],
-        "historic_allocations_securities_null",
+        "historic_allocations_securities_null"
     )
 
     return joined_df
